@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rise Dialer</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📞</text></svg>">
+</head>
+<body>
+  <!-- Login -->
+  <div id="login" class="login-wrap hidden">
+    <form class="login-card" id="loginForm">
+      <h1>Rise Dialer</h1>
+      <p>Calls, texts and AI agents for the team.</p>
+      <label>Email</label>
+      <input type="email" name="email" autocomplete="username" required>
+      <label>Password</label>
+      <input type="password" name="password" autocomplete="current-password" required>
+      <div class="err" id="loginErr"></div>
+      <button class="btn primary call-btn" type="submit">Log in</button>
+    </form>
+  </div>
+
+  <!-- App -->
+  <div id="app" class="app hidden">
+    <aside class="side">
+      <div class="brand"><div class="brand-mark">📞</div><span id="brandName">Rise Dialer</span></div>
+      <nav class="nav" id="nav">
+        <button data-tab="messages"><span class="ico">💬</span><span class="lbl">Messages</span><span class="badge hidden" id="unreadBadge">0</span></button>
+        <button data-tab="calls"><span class="ico">📋</span><span class="lbl">Calls</span></button>
+        <button data-tab="agents"><span class="ico">🤖</span><span class="lbl">AI Agents</span></button>
+        <button data-tab="contacts"><span class="ico">👤</span><span class="lbl">Contacts</span></button>
+        <button data-tab="admin" class="admin-only"><span class="ico">⚙️</span><span class="lbl">Admin</span></button>
+      </nav>
+      <div class="side-foot">
+        <div class="who" id="meName"></div>
+        <button class="status-pill" id="statusBtn"><span class="dot on" id="statusDot"></span><span id="statusText">Available</span></button>
+        <div class="side-links"><a id="mySettingsLink">My settings</a><a id="logoutLink">Log out</a></div>
+      </div>
+    </aside>
+
+    <main class="main" id="main"></main>
+
+    <section class="phone" id="phone"></section>
+  </div>
+
+  <div id="overlayRoot"></div>
+  <script src="/vendor/twilio.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
