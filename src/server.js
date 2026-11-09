@@ -21,6 +21,10 @@ app.set('trust proxy', true);
 app.disable('x-powered-by');
 
 app.get('/healthz', (req, res) => res.json({ ok: true }));
+// Claude's connector checks these OAuth discovery paths first. This server uses a secret link
+// instead of OAuth, so answer with a clean JSON 404 (never the dashboard HTML).
+app.all(/^\/\.well-known\//, (req, res) => res.status(404).json({ error: 'not_found' }));
+app.all(/^\/(register|authorize|token|oauth)(\/|$)/, (req, res) => res.status(404).json({ error: 'not_found' }));
 app.use('/twilio', require('./routes/twilio'));
 app.use('/api', require('./routes/api'));
 app.use('/mcp', require('./mcp'));
