@@ -549,7 +549,7 @@
       <div class="card">
         <table class="list"><thead><tr><th>Number</th><th>When someone calls</th><th>AI backup</th><th></th></tr></thead><tbody>
         ${numbers.map((n) => `<tr><td><strong>${esc(fmtPhone(n.number))}</strong><div class="meta">${esc(n.friendly_name || '')}</div></td>
-          <td>${esc(modeLabel[n.inbound_mode])}${n.inbound_mode === 'user' ? ': ' + esc(n.assigned_user_name || '—') : ''}${n.inbound_mode === 'ai' ? ': ' + esc(n.ai_agent_name || 'first active agent') : ''}</td>
+          <td>${n.inbound_mode !== 'ai' && n.ring_group_enabled ? ringGroupLabel(n, users) : esc(modeLabel[n.inbound_mode]) + (n.inbound_mode === 'user' ? ': ' + esc(n.assigned_user_name || '—') : '') + (n.inbound_mode === 'ai' ? ': ' + esc(n.ai_agent_name || 'first active agent') : '')}</td>
           <td class="small">${n.ai_on_no_answer && n.ai_agent_name ? '🤖 ' + esc(n.ai_agent_name) + ' if nobody answers' : '<span class="muted">Voicemail if nobody answers</span>'}</td>
           <td style="text-align:right"><button class="btn sm" data-num="${n.id}">Edit</button></td></tr>`).join('') || '<tr><td colspan="4" class="muted" style="padding:20px;text-align:center">No numbers yet — buy one or sync from Twilio.</td></tr>'}
         </tbody></table>
@@ -589,7 +589,17 @@
     $$('[data-num]').forEach((b) => b.onclick = () => numberModal(numbers.find((n) => n.id === Number(b.dataset.num)), users, agents));
   }
 
+  const parseList = (s) => { try { return JSON.parse(s || '[]'); } catch { return []; } };
+  function ringGroupLabel(n, users) {
+    const ids = parseList(n.ring_group_user_ids);
+    const names = users.filter((u) => ids.includes(u.id)).map((u) => u.name);
+    const extra = parseList(n.ring_group_extra).map(fmtPhone);
+    return `<strong>Ring group</strong> (first to answer gets it): ${esc([...names, ...extra].join(', ') || '—')}${n.ring_group_cells ? ' <span class="meta">+ their cells</span>' : ''}`;
+  }
+
   function numberModal(n, users, agents) {
+    const groupIds = parseList(n.ring_group_user_ids);
+    const groupExtra = parseList(n.ring_group_extra).map(fmtPhone).join('\n');
     const m = openOverlay(`
       <h3>${esc(fmtPhone(n.number))}</h3>
       <form id="nForm">
@@ -600,8 +610,23 @@
           <option value="user" ${n.inbound_mode === 'user' ? 'selected' : ''}>Ring one person</option>
           <option value="ai" ${n.inbound_mode === 'ai' ? 'selected' : ''}>AI agent answers every call</option>
         </select>
+
+        <div class="card card-pad" style="margin-top:14px;box-shadow:none" id="rgBox">
+          <label class="check" style="margin:0"><input type="checkbox" name="ring_group_enabled" id="rgToggle" ${n.ring_group_enabled ? 'checked' : ''}><span><strong>Ring a group</strong> — everyone picked rings at once; the first to answer gets the call</span></label>
+          <div id="rgFields" class="${n.ring_group_enabled ? '' : 'hidden'}">
+            <label>Who rings</label>
+            ${users.filter((u) => u.active).map((u) => `<label class="check" style="margin:4px 0"><input type="checkbox" name="rg_user" value="${u.id}" ${groupIds.includes(u.id) ? 'checked' : ''}> ${esc(u.name)}${u.cell_phone ? ` <span class="meta">${esc(fmtPhone(u.cell_phone))}</span>` : ' <span class="meta">(no cell saved)</span>'}</label>`).join('')}
+            <label class="check" style="margin-top:10px"><input type="checkbox" name="ring_group_cells" ${n.ring_group_cells ? 'checked' : ''}> Also ring their cell phones</label>
+            <label>Extra numbers to ring (optional, one per line)</label>
+            <textarea name="ring_group_extra" style="min-height:60px" placeholder="(254) 555-0123">${esc(groupExtra)}</textarea>
+            <p class="meta" style="margin:6px 0 0">Cell phones hear “Business call — press 1 to take it,” so a cell’s own voicemail can’t grab the call. Teammates set to Away are skipped. Up to 10 phones ring at once for 30 seconds.</p>
+          </div>
+        </div>
+
+        <div id="oneUser">
         <label>Person (for “Ring one person”)</label>
         <select name="assigned_user_id"><option value="">—</option>${users.map((u) => `<option value="${u.id}" ${u.id === n.assigned_user_id ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}</select>
+        </div>
         <label>AI agent</label>
         <select name="ai_agent_id"><option value="">None</option>${agents.map((a) => `<option value="${a.id}" ${a.id === n.ai_agent_id ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
         <label class="check"><input type="checkbox" name="ai_on_no_answer" ${n.ai_on_no_answer ? 'checked' : ''}> If nobody picks up, the AI agent answers (instead of voicemail)</label>
@@ -609,11 +634,24 @@
         <div class="row" style="margin-top:10px"><button class="btn primary" type="submit">Save</button><button class="btn" type="button" id="nCancel">Cancel</button></div>
       </form>`, { center: true });
     $('#nCancel', m).onclick = closeOverlay;
-    $('#nForm', m).onsubmit = async (e) => {
+    const form = $('#nForm', m);
+    const sync = () => {
+      const ai = form.inbound_mode.value === 'ai';
+      $('#rgBox', m).classList.toggle('hidden', ai);
+      $('#rgFields', m).classList.toggle('hidden', !$('#rgToggle', m).checked);
+      $('#oneUser', m).classList.toggle('hidden', ai || $('#rgToggle', m).checked || form.inbound_mode.value !== 'user');
+    };
+    form.inbound_mode.onchange = sync; $('#rgToggle', m).onchange = sync; sync();
+    form.onsubmit = async (e) => {
       e.preventDefault();
       const f = formData(e.target);
+      const rgUsers = $$('input[name=rg_user]:checked', m).map((x) => Number(x.value));
       try {
-        await api('/admin/numbers/' + n.id, { body: { friendly_name: f.friendly_name, inbound_mode: f.inbound_mode, assigned_user_id: f.assigned_user_id ? Number(f.assigned_user_id) : null, ai_agent_id: f.ai_agent_id ? Number(f.ai_agent_id) : null, ai_on_no_answer: !!f.ai_on_no_answer } });
+        await api('/admin/numbers/' + n.id, { body: {
+          friendly_name: f.friendly_name, inbound_mode: f.inbound_mode, assigned_user_id: f.assigned_user_id ? Number(f.assigned_user_id) : null,
+          ai_agent_id: f.ai_agent_id ? Number(f.ai_agent_id) : null, ai_on_no_answer: !!f.ai_on_no_answer,
+          ring_group_enabled: !!f.ring_group_enabled, ring_group_user_ids: rgUsers, ring_group_cells: !!f.ring_group_cells, ring_group_extra: f.ring_group_extra || '',
+        } });
         closeOverlay(); toast('Saved'); renderAdmin();
       } catch (err) { $('#nErr', m).textContent = err.message; }
     };

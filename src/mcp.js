@@ -157,7 +157,7 @@ function buildServer() {
     annotations: { readOnlyHint: true },
   }, safe(() => ({
     users: all('SELECT id, name, email, role, status, cell_phone FROM users WHERE active = 1 ORDER BY name'),
-    numbers: svc.listNumbers().map((n) => ({ number: n.number, name: n.friendly_name, inbound_mode: n.inbound_mode, assigned_to: n.assigned_user_name, ai_agent: n.ai_agent_name })),
+    numbers: svc.listNumbers().map((n) => ({ number: n.number, name: n.friendly_name, inbound_mode: n.inbound_mode, assigned_to: n.assigned_user_name, ai_agent: n.ai_agent_name, ring_group: n.ring_group_enabled ? { user_ids: JSON.parse(n.ring_group_user_ids || '[]'), ring_cells: !!n.ring_group_cells, extra_numbers: JSON.parse(n.ring_group_extra || '[]') } : null })),
   })));
 
   return server;

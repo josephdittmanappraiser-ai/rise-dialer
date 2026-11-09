@@ -168,6 +168,35 @@ const ok = (name) => { passed++; console.log('  ✓', name); };
   assert.ok(!inc3.text.includes('joseph_dittman') && inc3.text.includes('stephanie')); ok('"Away" teammate is skipped');
   await api('/me', { status: 'available' });
 
+  console.log('Ring groups');
+  await api('/admin/numbers/1', { ai_on_no_answer: false });
+  const bad = await api('/admin/numbers/1', { ring_group_enabled: true, ring_group_user_ids: [], ring_group_extra: '' });
+  assert.equal(bad.status, 400); ok('ring group with nobody in it is refused');
+  const badNum = await api('/admin/numbers/1', { ring_group_enabled: true, ring_group_user_ids: [2], ring_group_extra: 'call me' });
+  assert.equal(badNum.status, 400); ok('invalid extra number refused');
+  const rg = await api('/admin/numbers/1', { ring_group_enabled: true, ring_group_user_ids: [2], ring_group_cells: true, ring_group_extra: '(254) 555-0177\n254-555-0177' });
+  assert.equal(rg.status, 200, JSON.stringify(rg.data)); assert.equal(JSON.parse(rg.data.ring_group_extra).length, 2);
+  let grp = await hook('/twilio/voice/incoming', { From: '+15125556666', To: '+12545550100', CallSid: 'CArg1' });
+  assert.ok(grp.text.includes('>stephanie</Client>') && !grp.text.includes('joseph_dittman')); ok('only the picked teammate rings in the browser');
+  assert.ok(grp.text.includes('+12545550111</Number>')); ok('their cell rings at the same time');
+  assert.equal((grp.text.match(/\+12545550177<\/Number>/g) || []).length, 1); ok('extra number rings once (duplicates removed)');
+  assert.ok(/<Number url="[^"]*\/twilio\/voice\/screen\?callId=\d+&amp;userId=2"/.test(grp.text)); ok('cells get press-1 screening');
+  const rgCall = (await api('/calls')).data.find((c) => c.call_sid === 'CArg1');
+  const scr = await hook(`/twilio/voice/screen?callId=${rgCall.id}&userId=2`, {});
+  assert.ok(scr.text.includes('<Gather') && scr.text.includes('Press 1') && scr.text.includes('<Hangup')); ok('screen asks to press 1, drops leg if no answer (voicemail)');
+  const take = await hook(`/twilio/voice/screen-result?callId=${rgCall.id}&userId=2`, { Digits: '1' });
+  assert.ok(!take.text.includes('Hangup')); assert.equal((await api('/calls/' + rgCall.id)).data.user_name, 'Stephanie'); ok('pressing 1 connects + logs who took it');
+  const skip = await hook(`/twilio/voice/screen-result?callId=${rgCall.id}`, { Digits: '9' });
+  assert.ok(skip.text.includes('<Hangup')); ok('any other key declines that leg');
+  await api('/admin/users', { id: 2, status: 'away' }); // admin edit ignores status; set via db
+  run("UPDATE users SET status = 'away' WHERE id = 2");
+  grp = await hook('/twilio/voice/incoming', { From: '+15125556667', To: '+12545550100', CallSid: 'CArg2' });
+  assert.ok(!grp.text.includes('stephanie') && grp.text.includes('+12545550177')); ok('Away teammate skipped, extra number still rings');
+  run("UPDATE users SET status = 'available' WHERE id = 2");
+  await api('/admin/numbers/1', { ring_group_enabled: false });
+  grp = await hook('/twilio/voice/incoming', { From: '+15125556668', To: '+12545550100', CallSid: 'CArg3' });
+  assert.ok(grp.text.includes('joseph_dittman') && grp.text.includes('stephanie') && !grp.text.includes('+12545550177')); ok('toggle off → back to normal ringing');
+
   console.log('AI agent — inbound AI line');
   const aiIn = await hook('/twilio/voice/incoming', { From: '+15125551234', To: '+12545550199', CallSid: 'CAai-in' });
   assert.ok(aiIn.text.includes('welcomeGreeting="Thanks for calling Rise Public Adjusting')); ok('AI line answers with greeting');

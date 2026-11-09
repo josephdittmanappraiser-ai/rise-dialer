@@ -112,6 +112,17 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(other_number, our_number, created_at);
 `);
 
+// ---- migrations for databases created by earlier versions ---------------
+function addColumn(table, column, ddl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+}
+// Ring groups: ring several teammates (and optionally their cells / extra numbers) at once.
+addColumn('phone_numbers', 'ring_group_enabled', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('phone_numbers', 'ring_group_user_ids', "TEXT NOT NULL DEFAULT '[]'");
+addColumn('phone_numbers', 'ring_group_cells', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('phone_numbers', 'ring_group_extra', "TEXT NOT NULL DEFAULT '[]'");
+
 // ---- tiny helpers -------------------------------------------------------
 const stmtCache = new Map();
 function prep(sql) {

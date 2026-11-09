@@ -5,7 +5,7 @@ const { get, all, getSetting } = require('../db');
 const tw = require('../twilio');
 const svc = require('../services');
 const { broadcast } = require('../events');
-const { e164, prettyPhone } = require('../util');
+const { e164, prettyPhone, safeJson } = require('../util');
 
 const router = express.Router();
 const { VoiceResponse, MessagingResponse } = tw.twilio.twiml;
@@ -46,29 +46,54 @@ function voicemailTwiml(twiml, callRow) {
   return twiml;
 }
 
+// Who rings when a call comes in (or the AI transfers). Twilio allows up to 10 at once;
+// everyone rings together and the first to answer gets the caller.
+const MAX_LEGS = 10;
 function ringTargets(numberRow) {
+  if (numberRow.ring_group_enabled) {
+    const ids = safeJson(numberRow.ring_group_user_ids, []).map(Number).filter(Boolean);
+    const users = ids.length
+      ? all(`SELECT * FROM users WHERE active = 1 AND status = 'available' AND id IN (${ids.map(() => '?').join(',')}) ORDER BY id`, ...ids)
+      : [];
+    const extra = safeJson(numberRow.ring_group_extra, []).map(e164).filter(Boolean);
+    return { users, ringCells: Boolean(numberRow.ring_group_cells), extra };
+  }
   let users = [];
   if (numberRow.inbound_mode === 'user' && numberRow.assigned_user_id) {
     users = all('SELECT * FROM users WHERE id = ? AND active = 1', numberRow.assigned_user_id);
   } else {
     users = all("SELECT * FROM users WHERE active = 1 AND status = 'available' ORDER BY id LIMIT 10");
   }
-  return users;
+  return { users, ringCells: false, extra: [] };
 }
+const hasTargets = (t) => t.users.length > 0 || t.extra.length > 0;
 
-function dialTeam(twiml, { callerId, users, callRow, stage }) {
+function dialTeam(twiml, { callerId, targets, callRow, stage }) {
   const dial = twiml.dial({
-    timeout: 25,
+    timeout: 30,
     answerOnBridge: true,
     action: tw.url(`/twilio/voice/dial-done?callId=${callRow.id}&stage=${stage}`),
     ...(callerId ? { callerId } : {}),
     ...(config.recordCalls ? { record: 'record-from-answer-dual', recordingStatusCallback: tw.url('/twilio/voice/recording') } : {}),
   });
-  for (const u of users) {
-    const client = dial.client({ statusCallback: tw.url('/twilio/voice/leg-status'), statusCallbackEvent: 'answered' }, u.identity);
-    void client;
-    if (u.ring_cell && u.cell_phone) dial.number(e164(u.cell_phone));
+  const seen = new Set();
+  let legs = 0;
+  const addCell = (num, userId) => {
+    const n = e164(num);
+    if (!n || seen.has(n) || legs >= MAX_LEGS) return;
+    seen.add(n); legs++;
+    // Cell phones must press 1 first, so a cell's own voicemail can't "answer" and grab the call.
+    dial.number({
+      url: tw.url(`/twilio/voice/screen?callId=${callRow.id}${userId ? `&userId=${userId}` : ''}`), method: 'POST',
+    }, n);
+  };
+  for (const u of targets.users) {
+    if (legs >= MAX_LEGS) break;
+    dial.client({ statusCallback: tw.url('/twilio/voice/leg-status'), statusCallbackEvent: 'answered' }, u.identity);
+    legs++;
+    if ((targets.ringCells || u.ring_cell) && u.cell_phone) addCell(u.cell_phone, u.id);
   }
+  for (const n of targets.extra) addCell(n, null);
   return twiml;
 }
 
@@ -119,13 +144,13 @@ router.post('/voice/incoming', (req, res) => {
 
   if (num.inbound_mode === 'ai' && agent) return sendTwiml(res, aiTwiml(twiml, agent, row));
 
-  const users = ringTargets(num);
-  if (!users.length) {
+  const targets = ringTargets(num);
+  if (!hasTargets(targets)) {
     if (agent && num.ai_on_no_answer) { svc.updateCall(row.id, { kind: 'ai' }); return sendTwiml(res, aiTwiml(twiml, agent, svc.getCall(row.id))); }
     return sendTwiml(res, voicemailTwiml(twiml, row));
   }
   // Show the caller's number (not ours) on the team's screens.
-  sendTwiml(res, dialTeam(twiml, { callerId: caller, users, callRow: row, stage: 'inbound' }));
+  sendTwiml(res, dialTeam(twiml, { callerId: caller, targets, callRow: row, stage: 'inbound' }));
 });
 
 // Which teammate picked up an inbound call.
@@ -137,6 +162,31 @@ router.post('/voice/leg-status', (req, res) => {
     if (u) svc.updateCall(parent.id, { user_id: u.id, status: 'in-progress' });
   }
   res.sendStatus(204);
+});
+
+// A cell phone in the ring group picked up: make sure a person (not voicemail) is there.
+router.post('/voice/screen', (req, res) => {
+  const twiml = new VoiceResponse();
+  const row = svc.getCall(Number(req.query.callId));
+  const who = row ? (row.contact_name || prettyPhone(row.other_number)).replace(/[()]/g, '') : 'a caller';
+  const gather = twiml.gather({
+    numDigits: 1, timeout: 8,
+    action: tw.url(`/twilio/voice/screen-result?callId=${req.query.callId || ''}${req.query.userId ? `&userId=${req.query.userId}` : ''}`), method: 'POST',
+  });
+  gather.say({ voice: 'Polly.Joanna-Neural' }, `Business call from ${who}. Press 1 to take it.`);
+  twiml.hangup(); // no key pressed (voicemail or ignored) → drop this leg; the others keep ringing
+  sendTwiml(res, twiml);
+});
+
+router.post('/voice/screen-result', (req, res) => {
+  const twiml = new VoiceResponse();
+  if (req.body.Digits === '1') {
+    const row = svc.getCall(Number(req.query.callId));
+    if (row && req.query.userId) svc.updateCall(row.id, { user_id: Number(req.query.userId), status: 'in-progress' });
+    return sendTwiml(res, twiml); // empty response = connect this person to the caller
+  }
+  twiml.hangup();
+  sendTwiml(res, twiml);
 });
 
 // After a <Dial> finishes (answered, or nobody picked up).
@@ -215,8 +265,8 @@ router.post('/voice/ai-done', (req, res) => {
       }).number(agent.transfer_number);
     } else {
       const num = svc.numberRow(row.our_number) || { inbound_mode: 'ring_all' };
-      const users = ringTargets(num);
-      if (users.length) dialTeam(twiml, { callerId: row.direction === 'inbound' ? row.other_number : row.our_number, users, callRow: row, stage: 'transfer' });
+      const targets = ringTargets(num);
+      if (hasTargets(targets)) dialTeam(twiml, { callerId: row.direction === 'inbound' ? row.other_number : row.our_number, targets, callRow: row, stage: 'transfer' });
       else voicemailTwiml(twiml, row);
     }
     return sendTwiml(res, twiml);

@@ -11,7 +11,7 @@ const { e164 } = require('../util');
 const router = express.Router();
 router.use(express.json({ limit: '1mb' }));
 
-const wrap = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((e) => {
+const wrap = (fn) => (req, res) => Promise.resolve().then(() => fn(req, res)).catch((e) => {
   console.error('[api]', req.method, req.path, e.message);
   res.status(e.status || 400).json({ error: e.message });
 });
@@ -169,14 +169,31 @@ admin.post('/numbers/sync', wrap(async (req, res) => res.json(await tw.syncNumbe
 admin.get('/numbers/search', wrap(async (req, res) => res.json(await tw.searchNumbers({ areaCode: req.query.areaCode, contains: req.query.contains, tollFree: req.query.tollFree === '1' }))));
 admin.post('/numbers/buy', wrap(async (req, res) => res.json(await tw.buyNumber(req.body.number))));
 admin.post('/numbers/:id', wrap((req, res) => {
-  const { friendly_name, inbound_mode, assigned_user_id, ai_agent_id, ai_on_no_answer } = req.body;
+  const { friendly_name, inbound_mode, assigned_user_id, ai_agent_id, ai_on_no_answer,
+    ring_group_enabled, ring_group_user_ids, ring_group_cells, ring_group_extra } = req.body;
   if (inbound_mode && !['user', 'ring_all', 'ai'].includes(inbound_mode)) throw new Error('Bad inbound mode');
+  let extra;
+  if (ring_group_extra !== undefined) {
+    const list = Array.isArray(ring_group_extra) ? ring_group_extra : String(ring_group_extra || '').split(/[\n,;]+/);
+    extra = list.map((s) => String(s).trim()).filter(Boolean).map((s) => {
+      const n = e164(s);
+      if (!/^\+\d{10,15}$/.test(n)) throw new Error(`"${s}" isn't a valid phone number.`);
+      return n;
+    });
+  }
+  const userIds = ring_group_user_ids === undefined ? undefined : (Array.isArray(ring_group_user_ids) ? ring_group_user_ids : []).map(Number).filter(Boolean);
+  if (ring_group_enabled && userIds && !userIds.length && (!extra || !extra.length)) throw new Error('Pick at least one teammate or extra number for the ring group.');
   update('phone_numbers', Number(req.params.id), {
     friendly_name, inbound_mode,
     assigned_user_id: assigned_user_id === undefined ? undefined : (assigned_user_id || null),
     ai_agent_id: ai_agent_id === undefined ? undefined : (ai_agent_id || null),
     ai_on_no_answer: ai_on_no_answer === undefined ? undefined : (ai_on_no_answer ? 1 : 0),
-  }, ['friendly_name', 'inbound_mode', 'assigned_user_id', 'ai_agent_id', 'ai_on_no_answer']);
+    ring_group_enabled: ring_group_enabled === undefined ? undefined : (ring_group_enabled ? 1 : 0),
+    ring_group_user_ids: userIds === undefined ? undefined : JSON.stringify(userIds),
+    ring_group_cells: ring_group_cells === undefined ? undefined : (ring_group_cells ? 1 : 0),
+    ring_group_extra: extra === undefined ? undefined : JSON.stringify(extra),
+  }, ['friendly_name', 'inbound_mode', 'assigned_user_id', 'ai_agent_id', 'ai_on_no_answer',
+    'ring_group_enabled', 'ring_group_user_ids', 'ring_group_cells', 'ring_group_extra']);
   res.json(svc.listNumbers().find((n) => n.id === Number(req.params.id)));
 }));
 
